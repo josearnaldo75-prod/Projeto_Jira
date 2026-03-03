@@ -2,6 +2,7 @@ import requests
 from requests.auth import HTTPBasicAuth
 import pandas as pd
 from datetime import datetime
+import json
 import os
 from pathlib import Path
 from openpyxl.utils import get_column_letter
@@ -108,6 +109,148 @@ def extract_request_type_details(request_field: dict | None) -> dict:
         "request_current_status": current_status.get("status"),
         "request_current_status_category": current_status.get("statusCategory"),
         "request_current_status_date": to_excel_datetime(status_date.get("jira")),
+    }
+
+
+def extract_adf_text(node) -> str:
+    if node is None:
+        return ""
+
+    if isinstance(node, dict):
+        parts = []
+        text_value = node.get("text")
+        if isinstance(text_value, str):
+            parts.append(text_value)
+
+        content = node.get("content")
+        if isinstance(content, list):
+            for child in content:
+                child_text = extract_adf_text(child)
+                if child_text:
+                    parts.append(child_text)
+
+        return "\n".join([part for part in parts if part]).strip()
+
+    if isinstance(node, list):
+        parts = []
+        for child in node:
+            child_text = extract_adf_text(child)
+            if child_text:
+                parts.append(child_text)
+        return "\n".join(parts).strip()
+
+    return ""
+
+
+def parse_comment_metrics(comment_field: dict | None) -> dict:
+    if not isinstance(comment_field, dict):
+        return {
+            "comment_count": 0,
+            "comment_authors": None,
+            "comment_first_date": None,
+            "comment_last_date": None,
+            "comment_last_author": None,
+            "comment_last_text": None,
+            "comment_all_text": None,
+            "comment_raw": None,
+        }
+
+    comments = comment_field.get("comments", [])
+    if not isinstance(comments, list):
+        comments = []
+
+    authors = []
+    all_texts = []
+    first_date = None
+    last_date = None
+    last_author = None
+    last_text = None
+
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+
+        author_name = (comment.get("author") or {}).get("displayName")
+        if author_name:
+            authors.append(author_name)
+
+        created = parse_jira_datetime(comment.get("created"))
+        created_naive = created.replace(tzinfo=None) if created else None
+
+        if created_naive and (first_date is None or created_naive < first_date):
+            first_date = created_naive
+        if created_naive and (last_date is None or created_naive > last_date):
+            last_date = created_naive
+            last_author = author_name
+
+        body_text = extract_adf_text(comment.get("body"))
+        if body_text:
+            all_texts.append(body_text)
+            if created_naive and created_naive == last_date:
+                last_text = body_text
+
+    unique_authors = sorted(set(authors)) if authors else []
+
+    if last_text is None and all_texts:
+        last_text = all_texts[-1]
+
+    return {
+        "comment_count": len(comments),
+        "comment_authors": " | ".join(unique_authors) if unique_authors else None,
+        "comment_first_date": first_date,
+        "comment_last_date": last_date,
+        "comment_last_author": last_author,
+        "comment_last_text": last_text,
+        "comment_all_text": "\n---\n".join(all_texts) if all_texts else None,
+        "comment_raw": json.dumps(comment_field, ensure_ascii=False) if comment_field else None,
+    }
+
+
+def parse_description_field(description_field) -> dict:
+    if description_field is None:
+        return {
+            "description_is_json": False,
+            "description_text": None,
+            "description_raw": None,
+        }
+
+    if isinstance(description_field, (dict, list)):
+        return {
+            "description_is_json": True,
+            "description_text": extract_adf_text(description_field) or None,
+            "description_raw": json.dumps(description_field, ensure_ascii=False),
+        }
+
+    if isinstance(description_field, str):
+        stripped = description_field.strip()
+        if not stripped:
+            return {
+                "description_is_json": False,
+                "description_text": None,
+                "description_raw": None,
+            }
+
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, (dict, list)):
+                return {
+                    "description_is_json": True,
+                    "description_text": extract_adf_text(parsed) or None,
+                    "description_raw": json.dumps(parsed, ensure_ascii=False),
+                }
+        except (TypeError, ValueError):
+            pass
+
+        return {
+            "description_is_json": False,
+            "description_text": stripped,
+            "description_raw": None,
+        }
+
+    return {
+        "description_is_json": False,
+        "description_text": str(description_field),
+        "description_raw": None,
     }
 
 
@@ -256,6 +399,8 @@ while True:
             "created",
             "updated",
             "resolutiondate",
+            "description",
+            "comment",
             "customfield_10010",
             "customfield_10025",
             "customfield_10045",
@@ -326,6 +471,8 @@ rows = []
 
 for issue in all_issues:
     f = issue["fields"]
+    comment_metrics = parse_comment_metrics(f.get("comment"))
+    description_metrics = parse_description_field(f.get("description"))
 
     created_dt = parse_jira_datetime(f.get("created"))
     resolution_dt = parse_jira_datetime(f.get("resolutiondate"))
@@ -371,6 +518,7 @@ for issue in all_issues:
     rows.append({
         "issue_key": issue["key"],
         "summary": f.get("summary"),
+        **description_metrics,
         "request_type_id": f.get("issuetype", {}).get("id"),
         "status": f.get("status", {}).get("name"),
         "status_category": f.get("status", {}).get("statusCategory", {}).get("name"),
@@ -406,6 +554,7 @@ for issue in all_issues:
         "sla_fechamento_apos_resolucao_meta_min": sla_fechamento_apos_resolucao["goal_minutes"],
         "sla_fechamento_apos_resolucao_meta_texto": sla_fechamento_apos_resolucao["goal_friendly"],
         "sla_fechamento_apos_resolucao_estourado": sla_fechamento_apos_resolucao["breached"],
+        **comment_metrics,
     })
 
 df = pd.DataFrame(rows)
@@ -453,6 +602,8 @@ with pd.ExcelWriter(arquivo, engine="openpyxl") as writer:
             "resolution_date",
             "first_response_date",
             "request_current_status_date",
+            "comment_first_date",
+            "comment_last_date",
         },
     )
     format_worksheet(writer.sheets["resumo_geral"])

@@ -1,3 +1,7 @@
 .env
 __pycache__/
 *.xlsx
+jira_*_raw_*.json
+jira_*_flat_*.csv
+jira_*_issues_all_fields_raw_*.json
+jira_*_issues_flat_*.csv

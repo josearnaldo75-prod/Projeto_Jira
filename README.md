@@ -22,3 +22,18 @@ Script para extrair chamados do Jira e exportar para Excel.
 ```powershell
 python main.py
 ```
+
+## Extração completa de campos (para análise)
+
+Para mapear todos os campos possíveis do Jira e os campos efetivamente usados no projeto:
+
+```powershell
+python extrair_campos_jira.py
+```
+
+O script gera:
+- JSON bruto com todas as issues e campos retornados pela API
+- CSV flat com colunas por `field_id`
+- Excel com:
+   - aba `campos_usados` (campos encontrados nas issues + taxa de preenchimento)
+   - aba `catalogo_campos` (catálogo completo de campos do Jira + indicador de uso no projeto)
